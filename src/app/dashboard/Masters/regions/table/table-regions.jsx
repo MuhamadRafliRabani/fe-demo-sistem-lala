@@ -1,0 +1,323 @@
+"use client";
+
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { IconPlus } from "@tabler/icons-react";
+import { Badge } from "@/components/ui/badge";
+import { useRouter } from "next/navigation";
+import { useApiFetch } from "@/hooks/use-api-fetch";
+import ActionTable from "@/components/action-table";
+import FilterRegions from "../filters/filter-regions";
+import { DataTable } from "@/components/tables/data-table";
+import { ArrowDownUp, ArrowUpDown } from "lucide-react";
+
+// Key filter yang BUKAN bagian dari "filter data" (tidak perlu reset halaman)
+const PAGINATION_KEYS = ["page", "paginate"];
+
+const TableRegions = () => {
+  const router = useRouter();
+
+  // -----------------------------
+  // STATE API & FILTERING
+  // -----------------------------
+  const [filter, setFilter] = useState({
+    page: 1,
+    paginate: 15,
+    name: "",
+    is_active: "all",
+    sort: "order",
+  });
+
+  // [PAGINATION FIX] Setiap filter data berubah, page otomatis kembali ke 1.
+  const handleFilterChange = useCallback((updaterOrValue) => {
+    setFilter((prev) => {
+      const next =
+        typeof updaterOrValue === "function"
+          ? updaterOrValue(prev)
+          : updaterOrValue;
+
+      if (!next || next === prev) return prev;
+
+      const dataFilterChanged = Object.keys(next).some(
+        (key) => !PAGINATION_KEYS.includes(key) && next[key] !== prev[key],
+      );
+
+      if (dataFilterChanged && next.page === prev.page) {
+        return { ...next, page: 1 };
+      }
+      return next;
+    });
+  }, []);
+
+  // -----------------------------
+  // ADAPTER SORTING (Tanstack)
+  // -----------------------------
+  const sortingState = useMemo(() => {
+    const isDesc = filter.sort.startsWith("-");
+    const id = filter.sort.replace("-", "");
+    return [{ id, desc: isDesc }];
+  }, [filter.sort]);
+
+  const handleSortingChange = (updaterOrValue) => {
+    const newSorting =
+      typeof updaterOrValue === "function"
+        ? updaterOrValue(sortingState)
+        : updaterOrValue;
+
+    if (!newSorting?.length) return;
+
+    const { id, desc } = newSorting[0];
+    setFilter((prev) => ({
+      ...prev,
+      page: 1,
+      sort: desc ? `-${id}` : id,
+    }));
+  };
+
+  // -----------------------------
+  // ADAPTER PAGINATION (Tanstack)
+  // -----------------------------
+  const paginationState = useMemo(
+    () => ({
+      pageIndex: (filter.page || 1) - 1,
+      pageSize: filter.paginate || 15,
+    }),
+    [filter.page, filter.paginate],
+  );
+
+  const handlePaginationChange = useCallback((updaterOrValue) => {
+    setFilter((prev) => {
+      const currentPagination = {
+        pageIndex: (prev.page || 1) - 1,
+        pageSize: prev.paginate || 15,
+      };
+
+      const nextPagination =
+        typeof updaterOrValue === "function"
+          ? updaterOrValue(currentPagination)
+          : (updaterOrValue ?? currentPagination);
+
+      const nextPageSize = Math.max(
+        Number(nextPagination.pageSize ?? currentPagination.pageSize) || 15,
+        1,
+      );
+      const nextPageIndex = Math.max(
+        Number(nextPagination.pageIndex ?? currentPagination.pageIndex) || 0,
+        0,
+      );
+      const pageSizeChanged = nextPageSize !== (prev.paginate || 15);
+      const nextPage = pageSizeChanged ? 1 : nextPageIndex + 1;
+
+      if (nextPage === prev.page && nextPageSize === prev.paginate) {
+        return prev;
+      }
+
+      return { ...prev, page: nextPage, paginate: nextPageSize };
+    });
+  }, []);
+
+  // -----------------------------
+  // FETCH API
+  // -----------------------------
+  const params = useMemo(() => {
+    const p = {
+      page: filter.page,
+      per_page: filter.paginate,
+      search: filter.name,
+      sort: filter.sort,
+    };
+    if (filter.is_active && filter.is_active !== "all") {
+      p.is_active = filter.is_active;
+    }
+    return p;
+  }, [filter]);
+
+  const { data, isLoading, isFetching, refetch } = useApiFetch(
+    ["regions", params],
+    "/master/regions",
+    params,
+  );
+
+  // [PAGINATION FIX] Simpan hasil server terakhir yang valid.
+  const serverPage = data?.data ?? null;
+  const lastServerPageRef = useRef(null);
+  if (serverPage) {
+    lastServerPageRef.current = serverPage;
+  }
+  const pageData = serverPage ?? lastServerPageRef.current;
+
+  const regions = pageData?.data ?? [];
+  const lastPage = Math.max(Number(pageData?.last_page) || 1, 1);
+  const totalCount = Number(pageData?.total) || 0;
+
+  const isInitialLoading = Boolean(isLoading) && !pageData;
+  const isPageFetching = Boolean(isFetching) && !isInitialLoading;
+
+  // [PAGINATION FIX] Kalau page melebihi last_page, mundur ke halaman valid.
+  useEffect(() => {
+    if (!serverPage) return;
+    if (Number(serverPage.current_page) !== filter.page) return;
+
+    const maxPage = Math.max(Number(serverPage.last_page) || 1, 1);
+    if (filter.page > maxPage) {
+      setFilter((prev) =>
+        prev.page > maxPage ? { ...prev, page: maxPage } : prev,
+      );
+    }
+  }, [serverPage, filter.page]);
+
+  // -----------------------------
+  // DEFINISI KOLOM
+  // -----------------------------
+  const columns = useMemo(
+    () => [
+      {
+        id: "actions",
+        header: "Action",
+        enableHiding: false,
+        enablePinning: true,
+        size: 80,
+        cell: ({ row }) => (
+          <div onClick={(e) => e.stopPropagation()}>
+            <ActionTable
+              id={row.original.id}
+              url={`/Masters/regions`}
+              urlDelete={`/master/regions/${row.original.id}`}
+              isEdit
+              isDelete
+              refetch={refetch}
+            />
+          </div>
+        ),
+      },
+      {
+        accessorKey: "name",
+        header: ({ column }) => (
+          <Button
+            variant="ghost"
+            className="p-0 hover:bg-transparent flex gap-1 font-semibold"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Region Name
+            {column.getIsSorted() === "desc" ? (
+              <ArrowDownUp size={14} />
+            ) : (
+              <ArrowUpDown size={14} />
+            )}
+          </Button>
+        ),
+        cell: ({ row }) => (
+          <span className="font-medium">{row.getValue("name")}</span>
+        ),
+      },
+      {
+        accessorKey: "code",
+        header: "Code",
+        cell: ({ row }) => (
+          <Badge variant="outline">{row.getValue("code") || "-"}</Badge>
+        ),
+      },
+      {
+        accessorKey: "distance",
+        header: "Distance",
+        cell: ({ row }) => <span>{row.getValue("distance") || 0} km</span>,
+      },
+      {
+        accessorKey: "estimated_time",
+        header: "Est. Time",
+        cell: ({ row }) => (
+          <span>{row.getValue("estimated_time") || 0} min</span>
+        ),
+      },
+      {
+        accessorKey: "is_active",
+        header: "Status",
+        cell: ({ row }) => {
+          const active = row.getValue("is_active");
+          return (
+            <Badge
+              className={
+                active
+                  ? "bg-emerald-100 text-emerald-700"
+                  : "bg-muted text-muted-foreground"
+              }
+            >
+              {active ? "Active" : "Inactive"}
+            </Badge>
+          );
+        },
+      },
+      {
+        accessorKey: "order",
+        header: ({ column }) => (
+          <Button
+            variant="ghost"
+            className="p-0 hover:bg-transparent flex gap-1 font-semibold"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Order
+            {column.getIsSorted() === "desc" ? (
+              <ArrowDownUp size={14} />
+            ) : (
+              <ArrowUpDown size={14} />
+            )}
+          </Button>
+        ),
+        cell: ({ row }) => row.getValue("order") || 0,
+      },
+    ],
+    [refetch],
+  );
+
+  const handleAdd = () => {
+    router.push("/dashboard/Masters/regions/create");
+  };
+
+  // -----------------------------
+  // RENDER UTAMA
+  // -----------------------------
+  return (
+    <Tabs defaultValue="regions" className="w-full">
+      <div className="overflow-x-auto overflow-y-hidden md:pe-8">
+        <TabsContent value="regions" className="mt-6 space-y-6">
+          <FilterRegions filter={filter} setFilter={handleFilterChange} />
+
+          <div className="flex justify-end items-center">
+            <Button onClick={handleAdd} className="flex items-center gap-2">
+              <IconPlus size={16} /> Add Region
+            </Button>
+          </div>
+
+          <DataTable
+            columns={columns}
+            data={regions}
+            isLoading={isInitialLoading}
+            isFetching={isPageFetching}
+            enableColumnVisibility={true}
+            enableSorting={true}
+            enablePinning={true}
+            enableColumnResizing={true}
+            onRowClick={(row) =>
+              router.push(`/dashboard/Masters/regions/edit/${row.original.id}`)
+            }
+            // --- Server-side Sorting ---
+            manualSorting={true}
+            sorting={sortingState}
+            onSortingChange={handleSortingChange}
+            // --- Server-side Pagination (bawaan DataTable) ---
+            enablePagination={true}
+            manualPagination={true}
+            pagination={paginationState}
+            onPaginationChange={handlePaginationChange}
+            pageCount={lastPage}
+            totalCount={totalCount}
+            paginationLabel="regions"
+          />
+        </TabsContent>
+      </div>
+    </Tabs>
+  );
+};
+
+export default TableRegions;

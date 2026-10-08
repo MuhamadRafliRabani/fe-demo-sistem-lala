@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../langit-dashboard-backend"
+		}
+	],
+	"settings": {
+		"liveServer.settings.port": 5501
+	}
+}
