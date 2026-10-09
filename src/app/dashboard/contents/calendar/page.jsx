@@ -1,5 +1,14 @@
 "use client";
-import { useState } from "react";
+
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import Image from "next/image";
 import {
   Plus,
   X,
@@ -24,7 +33,10 @@ import { DatePicker } from "@/components/date-picker";
 import DashboardLayout from "@/components/layouts/dashboard-layout";
 import { useDateRange } from "@/lib/date-range";
 import { formatDateDb } from "@/lib/date-format-db";
-import Image from "next/image";
+
+/* -------------------------------------------------------------------------- */
+/*  Konstanta (di luar komponen supaya tidak dibuat ulang setiap render)       */
+/* -------------------------------------------------------------------------- */
 
 const MONTH_NAMES = [
   "JANUARI",
@@ -41,6 +53,37 @@ const MONTH_NAMES = [
   "DESEMBER",
 ];
 
+const DAYS_OF_WEEK = ["SEN", "SEL", "RAB", "KAM", "JUM", "SAB", "MIN"];
+
+const STATUS_FILTERS = ["All", "Draft", "Scheduled", "Published"];
+
+const STATUS_OPTIONS = [
+  { value: "Draft", label: "Draft" },
+  { value: "Scheduled", label: "Scheduled" },
+  { value: "Published", label: "Published" },
+];
+
+const PLATFORM_OPTIONS = [
+  { value: "Instagram", label: "Instagram" },
+  { value: "Youtube", label: "Youtube" },
+  { value: "Blog", label: "Blog" },
+  { value: "Twitter", label: "Twitter" },
+  { value: "TikTok", label: "TikTok" },
+];
+
+const ACCENTS = {
+  Youtube: "#818cf8",
+  Instagram: "#fb7185",
+  Blog: "#34d399",
+  Twitter: "#38bdf8",
+  TikTok: "#f43f5e",
+};
+
+const FALLBACK_ACCENT = "var(--muted-foreground)";
+
+const API_FIELDS =
+  "id,user_id,title,platform,type,date,time,status,description,cretime,creby,modtime,modby";
+
 const initialContent = {
   title: "",
   platform: "Instagram",
@@ -49,307 +92,116 @@ const initialContent = {
   description: "",
 };
 
-const platformOptions = [
-  { value: "Instagram", label: "Instagram" },
-  { value: "Youtube", label: "Youtube" },
-  { value: "Blog", label: "Blog" },
-  { value: "Twitter", label: "Twitter" },
-  { value: "TikTok", label: "TikTok" },
-];
-
-const buildDateAndTime = (value) => {
-  if (!value) {
-    return { date: "", time: "" };
+const SCROLLBAR_CSS = `
+  .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+    border-radius: 10px;
   }
+`;
+
+const INPUT_CLASS =
+  "w-full px-5 py-3 bg-background border border-input rounded-md focus:border-primary focus:ring-2 focus:ring-ring/20 outline-none transition-all font-bold text-foreground placeholder:text-muted-foreground";
+
+const LABEL_CLASS =
+  "text-[9px] font-bold text-muted-foreground uppercase tracking-widest";
+
+/* -------------------------------------------------------------------------- */
+/*  Helper murni                                                               */
+/* -------------------------------------------------------------------------- */
+
+const pad = (n) => String(n).padStart(2, "0");
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Ubah nilai tanggal apa pun menjadi kunci "YYYY-MM-DD" di zona waktu lokal.
+ * - String "YYYY-MM-DD" dipakai apa adanya (tidak di-parse, jadi tidak bisa geser hari).
+ * - String ISO / Date lain di-parse lalu dibaca dengan zona waktu lokal.
+ */
+const toDateKey = (value) => {
+  if (!value) return "";
+  if (typeof value === "string" && DATE_ONLY.test(value)) return value;
 
   const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
 
-  if (Number.isNaN(d.getTime())) {
-    return { date: "", time: "" };
-  }
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
 
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+const buildDateAndTime = (value) => {
+  if (!value) return { date: "", time: "" };
 
-  const hours = String(d.getHours()).padStart(2, "0");
-  const minutes = String(d.getMinutes()).padStart(2, "0");
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return { date: "", time: "" };
 
   return {
-    date: `${year}-${month}-${day}`,
-    time: `${hours}:${minutes}`,
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
   };
 };
 
+/** Gabungkan item.date + item.time menjadi Date lokal untuk DatePicker. */
 const buildDateFromItem = (item) => {
-  if (!item?.date) {
-    return null;
-  }
+  const key = toDateKey(item?.date);
+  if (!key) return null;
 
-  const base = new Date(item.date);
+  const [year, month, day] = key.split("-").map(Number);
+  const [rawH = "0", rawM = "0"] = String(item.time ?? "").split(":");
+  const h = Number(rawH);
+  const m = Number(rawM);
 
-  if (item.time) {
-    const [hours = "00", minutes = "00"] = String(item.time).split(":");
-    const h = Number(hours);
-    const m = Number(minutes);
-
-    if (!Number.isNaN(h)) {
-      base.setHours(h);
-    }
-
-    if (!Number.isNaN(m)) {
-      base.setMinutes(m);
-    }
-
-    base.setSeconds(0);
-  }
-
-  return base;
+  return new Date(
+    year,
+    month - 1,
+    day,
+    Number.isNaN(h) ? 0 : h,
+    Number.isNaN(m) ? 0 : m,
+    0,
+  );
 };
 
-const ContentPage = () => {
-  const [filterStatus, setFilterStatus] = useState("All");
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [isFullyExpanded, setIsFullyExpanded] = useState(false);
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [originRect, setOriginRect] = useState(null);
-  const [editingItem, setEditingItem] = useState(null);
-  const [newContent, setNewContent] = useState(initialContent);
-
-  const { start, end } = useDateRange("this_month");
-  const [dateRange, setDateRange] = useState({
-    start,
-    end,
-  });
-
-  const accents = {
-    Youtube: "#818cf8",
-    Instagram: "#fb7185",
-    Blog: "#34d399",
-    Twitter: "#38bdf8",
-    TikTok: "#f43f5e",
-  };
-
-  const startStr = dateRange.start ? formatDateDb(dateRange.start) : null;
-  const endStr = dateRange.end ? formatDateDb(dateRange.end) : null;
-
-  const filterParams = {};
-
-  if (filterStatus !== "All") {
-    filterParams.status = filterStatus;
+const getPlatformIcon = (platform, size = 12) => {
+  switch ((platform ?? "").toLowerCase()) {
+    case "instagram":
+      return <Instagram size={size} />;
+    case "youtube":
+      return <Youtube size={size} />;
+    case "twitter":
+      return <Twitter size={size} />;
+    case "blog":
+      return <FileText size={size} />;
+    default:
+      return <Globe size={size} />;
   }
+};
 
-  if (startStr && endStr) {
-    filterParams.date_between = {
-      start: startStr,
-      end: endStr,
-    };
-  }
+const normalizeItem = (item) => ({
+  id: item.id,
+  userId: item.user_id,
+  userName: item.user?.name ?? null,
+  title: item.title,
+  description: item.description,
+  platform: item.platform,
+  type: item.type,
+  date: toDateKey(item.date),
+  time: item.time,
+  status: item.status,
+  accentColor: ACCENTS[item.platform] ?? FALLBACK_ACCENT,
+  links: 0,
+  team: item.user?.name ?? "Creator",
+});
 
-  const { data, refetch } = useApiFetch(
-    ["content-calendar", filterStatus, startStr, endStr],
-    "/content-calendar",
-    {
-      fields:
-        "id,user_id,title,platform,type,date,time,status,description,cretime,creby,modtime,modby",
-      include: "user",
-      sort: "-date",
-      paginate: 200,
-      page: 1,
-      filter: Object.keys(filterParams).length ? filterParams : undefined,
-    },
-    true,
-  );
+/* -------------------------------------------------------------------------- */
+/*  Komponen kecil (di luar ContentPage: identitas stabil, tidak remount)      */
+/* -------------------------------------------------------------------------- */
 
-  const { mutate: createContent, isPending: isSaving } = usePost(
-    "/content-calendar",
-    {
-      invalidate: [["content-calendar"]],
-      onSuccess: () => {
-        setIsCreateModalOpen(false);
-        setEditingItem(null);
-        setNewContent(initialContent);
-        refetch();
-      },
-    },
-  );
+/** Render ke document.body supaya tidak terkurung stacking context / overflow parent. */
+const Portal = ({ children }) => createPortal(children, document.body);
 
-  const { mutate: updateContent, isPending: isUpdating } = usePut(
-    (payload) => `/content-calendar/${payload.id}`,
-    {
-      invalidate: [["content-calendar"]],
-      onSuccess: () => {
-        setIsCreateModalOpen(false);
-        setEditingItem(null);
-        setNewContent(initialContent);
-        refetch();
-      },
-    },
-  );
-
-  const { mutate: deleteContent, isPending: isDeleting } = useRemove(
-    (payload) => `/content-calendar/${payload.id}`,
-    {
-      invalidate: [["content-calendar"]],
-      onSuccess: () => {
-        refetch();
-      },
-    },
-  );
-
-  const apiItems = data?.data?.data ?? [];
-
-  const contentItems =
-    apiItems.map((item) => {
-      const accentColor =
-        accents[item.platform] ||
-        accents[item.platform?.toString()] ||
-        "var(--muted-foreground)";
-
-      let normalizedDate = "";
-
-      if (item.date) {
-        const parsed = new Date(item.date);
-
-        if (!Number.isNaN(parsed.getTime())) {
-          const year = parsed.getFullYear();
-          const month = String(parsed.getMonth() + 1).padStart(2, "0");
-          const day = String(parsed.getDate()).padStart(2, "0");
-          normalizedDate = `${year}-${month}-${day}`;
-        }
-      }
-
-      return {
-        id: item.id,
-        userId: item.user_id,
-        userName: item.user?.name ?? null,
-        title: item.title,
-        description: item.description,
-        platform: item.platform,
-        type: item.type,
-        date: normalizedDate,
-        time: item.time,
-        status: item.status,
-        accentColor,
-        links: 0,
-        team: item.user?.name ?? "Creator",
-      };
-    }) ?? [];
-
-  const daysOfWeek = ["SEN", "SEL", "RAB", "KAM", "JUM", "SAB", "MIN"];
-
-  const filteredItems =
-    filterStatus === "All"
-      ? contentItems
-      : contentItems.filter((item) => item.status === filterStatus);
-
-  const today = new Date();
-  const baseDate = dateRange.start ? new Date(dateRange.start) : today;
-  const currentYear = baseDate.getFullYear();
-  const currentMonth = baseDate.getMonth();
-  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-  const todayDateStr = `${today.getFullYear()}-${String(
-    today.getMonth() + 1,
-  ).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-
-  const calendarDays = [];
-
-  for (let i = 1; i <= daysInMonth; i++) {
-    const day = i;
-    const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(
-      2,
-      "0",
-    )}-${String(day).padStart(2, "0")}`;
-
-    calendarDays.push({
-      day,
-      date: dateStr,
-      items: filteredItems.filter((item) => item.date === dateStr),
-    });
-  }
-
-  const selectedDayObj = selectedDate
-    ? calendarDays.find((d) => d.date === selectedDate)
-    : null;
-
-  const handleDayClick = (day, e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    setOriginRect(rect);
-    setSelectedDate(day.date);
-    setTimeout(() => setIsFullyExpanded(true), 50);
-  };
-
-  const handleBack = () => {
-    setIsFullyExpanded(false);
-    setTimeout(() => {
-      setSelectedDate(null);
-      setOriginRect(null);
-    }, 400);
-  };
-
-  const handleOpenCreate = () => {
-    setEditingItem(null);
-    setNewContent(initialContent);
-    setIsCreateModalOpen(true);
-  };
-
-  const handleEdit = (item) => {
-    setEditingItem(item);
-    setNewContent({
-      title: item.title || "",
-      platform: item.platform || "Instagram",
-      status: item.status || "Draft",
-      date: buildDateFromItem(item),
-      description: item.description || "",
-    });
-    setIsCreateModalOpen(true);
-  };
-
-  const handleDelete = (item) => {
-    if (!item?.id) return;
-    const confirmed = window.confirm("Hapus jadwal konten ini dari kalender?");
-    if (!confirmed) return;
-
-    deleteContent({ id: item.id });
-  };
-
-  const handleAddContent = (e) => {
-    e.preventDefault();
-
-    const { date, time } = buildDateAndTime(newContent.date);
-
-    const payload = {
-      title: newContent.title,
-      platform: newContent.platform,
-      status: newContent.status,
-      date,
-      time,
-      description: newContent.description,
-    };
-
-    if (editingItem?.id) {
-      updateContent({ id: editingItem.id, ...payload });
-    } else {
-      createContent(payload);
-    }
-  };
-
-  const getPlatformIcon = (platform, size = 12) => {
-    switch (platform.toLowerCase()) {
-      case "instagram":
-        return <Instagram size={size} />;
-      case "youtube":
-        return <Youtube size={size} />;
-      case "twitter":
-        return <Twitter size={size} />;
-      case "blog":
-        return <FileText size={size} />;
-      default:
-        return <Globe size={size} />;
-    }
-  };
-
-  const MiniCardPreview = ({ item }) => (
+const MiniCardPreview = memo(function MiniCardPreview({ item }) {
+  return (
     <div
       className="flex flex-col p-2 mb-1 rounded border border-border/60 transition-all hover:brightness-95 cursor-pointer overflow-hidden"
       style={{
@@ -370,146 +222,380 @@ const ContentPage = () => {
       </p>
     </div>
   );
+});
 
-  const ElegantCard = ({ item, onEdit, onDelete }) => {
-    return (
-      <div className="group relative flex flex-col bg-card text-card-foreground rounded-xl overflow-hidden border border-border transition-all duration-300 hover:shadow-lg hover:-translate-y-1 h-full min-h-[240px]">
-        {/* Top Accent Line & Shadow Glow */}
-        <div
-          className="absolute top-0 left-0 w-full h-[3px]"
-          style={{ backgroundColor: item.accentColor }}
-        ></div>
-        <div
-          className="absolute top-0 left-0 w-full h-10 opacity-0 group-hover:opacity-10 transition-opacity"
-          style={{
-            background: `linear-gradient(to bottom, ${item.accentColor}, transparent)`,
-          }}
-        ></div>
+const statusDotColor = (status) => {
+  if (status === "Published") return "var(--success)";
+  if (status === "Scheduled") return "var(--primary)";
+  return "var(--muted-foreground)";
+};
 
-        {/* Card Body */}
-        <div className="p-5 flex flex-col flex-1">
-          <div className="flex justify-between items-start mb-4">
-            <div className="flex items-center gap-3">
-              {/* Avatar & User Info */}
-              <div className="relative">
-                <Image
-                  src={`https://api.dicebear.com/9.x/avataaars/svg?seed=Sarah`}
-                  alt={item.team}
-                  height={50}
-                  width={50}
-                  className="w-10 h-10 rounded-full bg-muted border-2 border-card ring-1 ring-border shadow-sm"
-                />
-                <div
-                  className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border-2 border-card text-primary-foreground shadow-sm"
-                  style={{ backgroundColor: item.accentColor }}
-                >
-                  {getPlatformIcon(item.platform, 8)}
-                </div>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-xs font-bold text-foreground leading-none mb-1">
-                  {item.team}
-                </span>
-                <div className="flex items-center gap-2">
-                  {/* Platform Label (Updated for clarity) */}
-                  <div
-                    className="flex items-center gap-1 px-1.5 py-0.5 rounded border transition-colors"
-                    style={{
-                      backgroundColor: `color-mix(in srgb, ${item.accentColor} 6%, transparent)`,
-                      borderColor: `color-mix(in srgb, ${item.accentColor} 18%, transparent)`,
-                      color: item.accentColor,
-                    }}
-                  >
-                    {getPlatformIcon(item.platform, 10)}
-                    <span className="text-[8px] uppercase tracking-tight">
-                      {item.platform}
-                    </span>
-                  </div>
+const ElegantCard = memo(function ElegantCard({
+  item,
+  onEdit,
+  onDelete,
+  isDeleting,
+}) {
+  return (
+    <div className="group relative flex flex-col bg-card text-card-foreground rounded-xl overflow-hidden border border-border transition-all duration-300 hover:shadow-lg hover:-translate-y-1 h-full min-h-[240px]">
+      {/* Top accent line & glow */}
+      <div
+        className="absolute top-0 left-0 w-full h-[3px]"
+        style={{ backgroundColor: item.accentColor }}
+      />
+      <div
+        className="absolute top-0 left-0 w-full h-10 opacity-0 group-hover:opacity-10 transition-opacity pointer-events-none"
+        style={{
+          background: `linear-gradient(to bottom, ${item.accentColor}, transparent)`,
+        }}
+      />
 
-                  <div className="w-1 h-1 rounded-full bg-muted-foreground/40"></div>
-
-                  <div className="flex items-center gap-1">
-                    <div
-                      className="w-1.5 h-1.5 rounded-full"
-                      style={{
-                        backgroundColor:
-                          item.status === "Published"
-                            ? "var(--success)"
-                            : item.status === "Scheduled"
-                              ? "var(--primary)"
-                              : "var(--muted-foreground)",
-                      }}
-                    ></div>
-                    <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">
-                      {item.status}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEdit?.(item);
-                }}
-                className="p-1.5 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
+      <div className="p-5 flex flex-col flex-1">
+        <div className="flex justify-between items-start mb-4">
+          <div className="flex items-center gap-3">
+            {/* Avatar */}
+            <div className="relative">
+              <Image
+                src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(item.team)}`}
+                alt={item.team}
+                height={50}
+                width={50}
+                unoptimized
+                className="w-10 h-10 rounded-full bg-muted border-2 border-card ring-1 ring-border shadow-sm"
+              />
+              <div
+                className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border-2 border-card text-primary-foreground shadow-sm"
+                style={{ backgroundColor: item.accentColor }}
               >
-                <FileEdit size={16} />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete?.(item);
-                }}
-                className="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
-              >
-                <Trash2 size={16} />
-              </button>
-            </div>
-          </div>
-
-          {/* Title & Content */}
-          <div className="mb-4">
-            <h3 className="text-[17px] font-extrabold text-foreground leading-tight tracking-tight group-hover:text-primary transition-colors line-clamp-2">
-              {item.title}
-            </h3>
-            <p className="text-muted-foreground text-[11px] mt-2 line-clamp-3 leading-relaxed">
-              {item.description ||
-                "Tambahkan deskripsi aset konten Anda di sini untuk memberikan konteks lebih mendalam bagi tim."}
-            </p>
-          </div>
-
-          {/* Footer Area */}
-          <div className="mt-auto pt-4 flex items-center justify-between border-t border-border">
-            <div className="flex items-center gap-4">
-              <button className="flex items-center gap-1.5 text-primary group/link">
-                <div className="p-1 bg-primary/10 rounded-md transition-colors group-hover/link:bg-primary/20">
-                  <MessagesSquare size={13} strokeWidth={2.5} />
-                </div>
-                <span className="text-[10px] uppercase tracking-tight">
-                  Forum Diskusi
-                </span>
-              </button>
-              <div className="flex items-center gap-1 text-muted-foreground">
-                <Link2 size={14} strokeWidth={2.5} />
-                <span className="text-[11px] font-bold">{item.links}</span>
+                {getPlatformIcon(item.platform, 8)}
               </div>
             </div>
 
-            <div className="flex items-center gap-2 bg-muted px-3 py-1.5 rounded-full border border-border transition-colors group-hover:bg-primary/10 group-hover:border-primary/30">
-              <Clock size={12} className="text-primary" />
-              <span className="text-[11px] text-foreground tracking-tight">
-                {item.time || "00:00"}
+            <div className="flex flex-col">
+              <span className="text-xs font-bold text-foreground leading-none mb-1">
+                {item.team}
               </span>
+              <div className="flex items-center gap-2">
+                <div
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded border transition-colors"
+                  style={{
+                    backgroundColor: `color-mix(in srgb, ${item.accentColor} 6%, transparent)`,
+                    borderColor: `color-mix(in srgb, ${item.accentColor} 18%, transparent)`,
+                    color: item.accentColor,
+                  }}
+                >
+                  {getPlatformIcon(item.platform, 10)}
+                  <span className="text-[8px] uppercase tracking-tight">
+                    {item.platform}
+                  </span>
+                </div>
+
+                <div className="w-1 h-1 rounded-full bg-muted-foreground/40" />
+
+                <div className="flex items-center gap-1">
+                  <div
+                    className="w-1.5 h-1.5 rounded-full"
+                    style={{ backgroundColor: statusDotColor(item.status) }}
+                  />
+                  <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">
+                    {item.status}
+                  </span>
+                </div>
+              </div>
             </div>
+          </div>
+
+          {/* Actions: tampil saat hover ATAU saat difokus keyboard */}
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+            <button
+              type="button"
+              aria-label={`Edit ${item.title}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit?.(item);
+              }}
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
+            >
+              <FileEdit size={16} />
+            </button>
+            <button
+              type="button"
+              aria-label={`Hapus ${item.title}`}
+              disabled={isDeleting}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete?.(item);
+              }}
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Title & description */}
+        <div className="mb-4">
+          <h3 className="text-[17px] font-extrabold text-foreground leading-tight tracking-tight group-hover:text-primary transition-colors line-clamp-2">
+            {item.title}
+          </h3>
+          <p className="text-muted-foreground text-[11px] mt-2 line-clamp-3 leading-relaxed">
+            {item.description ||
+              "Tambahkan deskripsi aset konten Anda di sini untuk memberikan konteks lebih mendalam bagi tim."}
+          </p>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-auto pt-4 flex items-center justify-between border-t border-border">
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              className="flex items-center gap-1.5 text-primary group/link"
+            >
+              <div className="p-1 bg-primary/10 rounded-md transition-colors group-hover/link:bg-primary/20">
+                <MessagesSquare size={13} strokeWidth={2.5} />
+              </div>
+              <span className="text-[10px] uppercase tracking-tight">
+                Forum Diskusi
+              </span>
+            </button>
+            <div className="flex items-center gap-1 text-muted-foreground">
+              <Link2 size={14} strokeWidth={2.5} />
+              <span className="text-[11px] font-bold">{item.links}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 bg-muted px-3 py-1.5 rounded-full border border-border transition-colors group-hover:bg-primary/10 group-hover:border-primary/30">
+            <Clock size={12} className="text-primary" />
+            <span className="text-[11px] text-foreground tracking-tight">
+              {item.time ? String(item.time).slice(0, 5) : "00:00"}
+            </span>
           </div>
         </div>
       </div>
-    );
+    </div>
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Halaman                                                                    */
+/* -------------------------------------------------------------------------- */
+
+const ContentPage = () => {
+  const [filterStatus, setFilterStatus] = useState("All");
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
+  const [newContent, setNewContent] = useState(initialContent);
+  const [formError, setFormError] = useState("");
+
+  const { start, end } = useDateRange("this_month");
+  const [dateRange, setDateRange] = useState({ start, end });
+
+  /* ------------------------------ Data fetching ----------------------------- */
+
+  const startStr = dateRange.start ? formatDateDb(dateRange.start) : null;
+  const endStr = dateRange.end ? formatDateDb(dateRange.end) : null;
+
+  const filterParams = useMemo(() => {
+    const params = {};
+    if (filterStatus !== "All") params.status = filterStatus;
+    if (startStr && endStr) params.date_between = { start: startStr, end: endStr };
+    return params;
+  }, [filterStatus, startStr, endStr]);
+
+  const { data, refetch } = useApiFetch(
+    ["content-calendar", filterStatus, startStr, endStr],
+    "/content-calendar",
+    {
+      fields: API_FIELDS,
+      include: "user",
+      sort: "-date",
+      paginate: 200,
+      page: 1,
+      filter: Object.keys(filterParams).length ? filterParams : undefined,
+    },
+    true,
+  );
+
+  /* -------------------------------- Mutations ------------------------------- */
+
+  const closeCreateModal = useCallback(() => {
+    setIsCreateModalOpen(false);
+    setEditingItem(null);
+    setNewContent(initialContent);
+    setFormError("");
+  }, []);
+
+  const handleSaved = useCallback(() => {
+    closeCreateModal();
+    refetch();
+  }, [closeCreateModal, refetch]);
+
+  const { mutate: createContent, isPending: isSaving } = usePost(
+    "/content-calendar",
+    { invalidate: [["content-calendar"]], onSuccess: handleSaved },
+  );
+
+  const { mutate: updateContent, isPending: isUpdating } = usePut(
+    (payload) => `/content-calendar/${payload.id}`,
+    { invalidate: [["content-calendar"]], onSuccess: handleSaved },
+  );
+
+  const { mutate: deleteContent, isPending: isDeleting } = useRemove(
+    (payload) => `/content-calendar/${payload.id}`,
+    { invalidate: [["content-calendar"]], onSuccess: () => refetch() },
+  );
+
+  /* ----------------------------- Data turunan ------------------------------- */
+
+  const apiItems = useMemo(() => data?.data?.data ?? [], [data]);
+
+  // Kelompokkan per tanggal sekali jalan: O(n), bukan O(hari x n).
+  const itemsByDate = useMemo(() => {
+    const map = new Map();
+
+    for (const raw of apiItems) {
+      const item = normalizeItem(raw);
+
+      // API sudah memfilter status; pengecekan ini hanya pengaman murah.
+      if (filterStatus !== "All" && item.status !== filterStatus) continue;
+      if (!item.date) continue;
+
+      const bucket = map.get(item.date);
+      if (bucket) bucket.push(item);
+      else map.set(item.date, [item]);
+    }
+
+    return map;
+  }, [apiItems, filterStatus]);
+
+  const baseDate = dateRange.start ? new Date(dateRange.start) : new Date();
+  const currentYear = baseDate.getFullYear();
+  const currentMonth = baseDate.getMonth();
+
+  const { calendarDays, leadingBlanks, trailingBlanks } = useMemo(() => {
+    const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    // getDay(): 0=Minggu. Header kita mulai dari Senin, jadi geser.
+    const offset = (new Date(currentYear, currentMonth, 1).getDay() + 6) % 7;
+
+    const days = Array.from({ length: daysInMonth }, (_, i) => {
+      const day = i + 1;
+      const date = `${currentYear}-${pad(currentMonth + 1)}-${pad(day)}`;
+      return { day, date, items: itemsByDate.get(date) ?? [] };
+    });
+
+    return {
+      calendarDays: days,
+      leadingBlanks: offset,
+      trailingBlanks: (7 - ((offset + daysInMonth) % 7)) % 7,
+    };
+  }, [currentYear, currentMonth, itemsByDate]);
+
+  const todayKey = toDateKey(new Date());
+
+  const selectedDayObj = useMemo(
+    () =>
+      selectedDate ? calendarDays.find((d) => d.date === selectedDate) : null,
+    [selectedDate, calendarDays],
+  );
+
+  /* -------------------------------- Handlers -------------------------------- */
+
+  const handleDayClick = useCallback((dateStr) => setSelectedDate(dateStr), []);
+  const handleBack = useCallback(() => setSelectedDate(null), []);
+
+  const handleOpenCreate = useCallback((dateStr) => {
+    setEditingItem(null);
+    setFormError("");
+    setNewContent({
+      ...initialContent,
+      // Hanya string tanggal yang valid; event klik dari tombol diabaikan.
+      date:
+        typeof dateStr === "string" && DATE_ONLY.test(dateStr)
+          ? new Date(`${dateStr}T09:00:00`)
+          : null,
+    });
+    setIsCreateModalOpen(true);
+  }, []);
+
+  const handleEdit = useCallback((item) => {
+    setEditingItem(item);
+    setFormError("");
+    setNewContent({
+      title: item.title || "",
+      platform: item.platform || "Instagram",
+      status: item.status || "Draft",
+      date: buildDateFromItem(item),
+      description: item.description || "",
+    });
+    setIsCreateModalOpen(true);
+  }, []);
+
+  const handleDelete = useCallback(
+    (item) => {
+      if (!item?.id) return;
+      if (!window.confirm("Hapus jadwal konten ini dari kalender?")) return;
+      deleteContent({ id: item.id });
+    },
+    [deleteContent],
+  );
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+
+    const { date, time } = buildDateAndTime(newContent.date);
+
+    if (!date) {
+      setFormError("Tanggal dan waktu wajib diisi.");
+      return;
+    }
+
+    const payload = {
+      title: newContent.title,
+      platform: newContent.platform,
+      status: newContent.status,
+      date,
+      time,
+      description: newContent.description,
+    };
+
+    if (editingItem?.id) {
+      updateContent({ id: editingItem.id, ...payload });
+    } else {
+      createContent(payload);
+    }
   };
+
+  const setField = (field) => (value) =>
+    setNewContent((prev) => ({ ...prev, [field]: value }));
+
+  /* ------------------------ Esc + scroll lock untuk overlay ----------------- */
+
+  const isOverlayOpen = Boolean(selectedDate) || isCreateModalOpen;
+
+  useEffect(() => {
+    if (!isOverlayOpen) return;
+
+    const onKeyDown = (e) => {
+      if (e.key !== "Escape") return;
+      // Modal create ada di atas agenda, jadi tutup yang paling atas dulu.
+      if (isCreateModalOpen) closeCreateModal();
+      else setSelectedDate(null);
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isOverlayOpen, isCreateModalOpen, closeCreateModal]);
+
+  const isSubmitting = isSaving || isUpdating;
+
+  /* --------------------------------- Render --------------------------------- */
 
   return (
     <DashboardLayout
@@ -518,9 +604,8 @@ const ContentPage = () => {
     >
       <div className="mt-4 md:mt-6 min-h-[calc(100vh-120px)] bg-background font-sans text-foreground flex flex-col overflow-hidden selection:bg-primary selection:text-primary-foreground rounded-xl border border-border shadow-xl">
         <div className="flex-1 flex flex-col relative p-6 overflow-hidden">
-          <div
-            className={`mb-6 flex items-center justify-between transition-all duration-500 ${selectedDayObj ? "opacity-0 -translate-y-10 pointer-events-none" : "opacity-100"}`}
-          >
+          {/* Header */}
+          <div className="mb-6 flex items-center justify-between">
             <div className="flex items-center gap-8">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight text-foreground uppercase">
@@ -531,57 +616,55 @@ const ContentPage = () => {
                     PRO PLAN
                   </span>
                   <p className="text-muted-foreground font-bold text-[10px] uppercase tracking-wider">
-                    {apiItems?.length ?? 0} Aset Terjadwal
+                    {apiItems.length} Aset Terjadwal
                   </p>
                 </div>
               </div>
-              <div className="flex flex-col gap-2">
-                <div className="flex bg-muted p-1 rounded-md border border-border">
-                  {["All", "Draft", "Scheduled", "Published"].map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => setFilterStatus(s)}
-                      className={`px-4 py-2 text-[9px] font-bold rounded-sm transition-all uppercase tracking-widest ${filterStatus === s ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
+
+              <div className="flex bg-muted p-1 rounded-md border border-border">
+                {STATUS_FILTERS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setFilterStatus(s)}
+                    aria-pressed={filterStatus === s}
+                    className={`px-4 py-2 text-[9px] font-bold rounded-sm transition-all uppercase tracking-widest ${
+                      filterStatus === s
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {s}
+                  </button>
+                ))}
               </div>
             </div>
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center gap-2 text-[10px]">
-                <div className="flex items-center gap-2  px-3 py-1 rounded ">
-                  <DatePicker
-                    value={dateRange.start}
-                    onChange={(val) =>
-                      setDateRange((prev) => ({
-                        ...prev,
-                        start: val,
-                      }))
-                    }
-                    label={null}
-                    placeholder="Mulai"
-                    className="text-xs font-bold min-w-[140px]"
-                  />
 
-                  <DatePicker
-                    value={dateRange.end}
-                    onChange={(val) =>
-                      setDateRange((prev) => ({
-                        ...prev,
-                        end: val,
-                      }))
-                    }
-                    label={null}
-                    placeholder="Selesai"
-                    className="text-xs font-bold min-w-[140px]"
-                  />
-                </div>
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center gap-2 px-3 py-1 text-[10px]">
+                <DatePicker
+                  value={dateRange.start}
+                  onChange={(val) =>
+                    setDateRange((prev) => ({ ...prev, start: val }))
+                  }
+                  label={null}
+                  placeholder="Mulai"
+                  className="text-xs font-bold min-w-[140px]"
+                />
+                <DatePicker
+                  value={dateRange.end}
+                  onChange={(val) =>
+                    setDateRange((prev) => ({ ...prev, end: val }))
+                  }
+                  label={null}
+                  placeholder="Selesai"
+                  className="text-xs font-bold min-w-[140px]"
+                />
               </div>
 
               <button
-                onClick={handleOpenCreate}
+                type="button"
+                onClick={() => handleOpenCreate()}
                 className="flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-md text-[10px] font-bold hover:brightness-110 shadow-lg shadow-primary/10 transition-all uppercase tracking-widest"
               >
                 <Plus size={14} />
@@ -590,9 +673,10 @@ const ContentPage = () => {
             </div>
           </div>
 
+          {/* Grid kalender */}
           <div className="flex-1 relative">
             <div className="h-full grid grid-cols-7 border-t border-l border-border rounded-md overflow-hidden bg-card">
-              {daysOfWeek.map((day) => (
+              {DAYS_OF_WEEK.map((day) => (
                 <div
                   key={day}
                   className="bg-muted py-3 text-center text-[9px] font-bold text-muted-foreground uppercase tracking-widest border-r border-b border-border"
@@ -601,25 +685,39 @@ const ContentPage = () => {
                 </div>
               ))}
 
+              {Array.from({ length: leadingBlanks }, (_, i) => (
+                <div
+                  key={`lead-${i}`}
+                  aria-hidden="true"
+                  className="border-r border-b border-border bg-muted/30"
+                />
+              ))}
+
               {calendarDays.map((dayObj) => {
-                const isSelected = selectedDayObj?.date === dayObj.date;
-                const isToday = dayObj.date === todayDateStr;
+                const isToday = dayObj.date === todayKey;
 
                 return (
                   <div
                     key={dayObj.date}
-                    onClick={(e) =>
-                      !selectedDayObj && handleDayClick(dayObj, e)
-                    }
-                    className={`
-                    relative border-r border-b border-border transition-all duration-300 flex flex-col
-                    ${selectedDayObj && !isSelected ? "opacity-5 blur-sm" : "opacity-100"}
-                    ${!selectedDayObj ? "bg-card hover:bg-muted cursor-pointer group/cell" : ""}
-                  `}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${dayObj.day} ${MONTH_NAMES[currentMonth]} ${currentYear}, ${dayObj.items.length} konten`}
+                    onClick={() => handleDayClick(dayObj.date)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleDayClick(dayObj.date);
+                      }
+                    }}
+                    className="group/cell relative flex min-h-[96px] cursor-pointer flex-col border-r border-b border-border bg-card transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                   >
                     <div className="p-3 flex justify-between items-start">
                       <span
-                        className={`text-xs font-bold ${isToday ? "bg-primary text-primary-foreground w-6 h-6 flex items-center justify-center rounded-full -m-1 shadow-md" : "text-muted-foreground group-hover/cell:text-foreground"}`}
+                        className={`text-xs font-bold ${
+                          isToday
+                            ? "bg-primary text-primary-foreground w-6 h-6 flex items-center justify-center rounded-full -m-1 shadow-md"
+                            : "text-muted-foreground group-hover/cell:text-foreground"
+                        }`}
                       >
                         {dayObj.day}
                       </span>
@@ -637,229 +735,229 @@ const ContentPage = () => {
                   </div>
                 );
               })}
+
+              {Array.from({ length: trailingBlanks }, (_, i) => (
+                <div
+                  key={`trail-${i}`}
+                  aria-hidden="true"
+                  className="border-r border-b border-border bg-muted/30"
+                />
+              ))}
             </div>
-
-            {selectedDayObj && (
-              <div className="fixed inset-0 z-[150]  flex items-center justify-center p-8 md:p-40 pointer-events-none">
-                <div
-                  className="bg-card text-card-foreground rounded-lg shadow-2xl border border-border overflow-hidden pointer-events-auto transition-all duration-500 cubic-bezier(0.16, 1, 0.3, 1)"
-                  style={{
-                    position: "fixed",
-                    left: isFullyExpanded ? "32px" : `${originRect?.left}px`,
-                    top: isFullyExpanded ? "50%" : `${originRect?.top}px`,
-                    width: isFullyExpanded ? "380px" : `${originRect?.width}px`,
-                    height: isFullyExpanded
-                      ? "calc(100% - 64px)"
-                      : `${originRect?.height}px`,
-                    transform: isFullyExpanded
-                      ? "translateY(-50%)"
-                      : "translateY(0)",
-                    zIndex: 160,
-                  }}
-                >
-                  <div
-                    className={`p-10 h-full flex flex-col transition-all duration-500 ${isFullyExpanded ? "opacity-100" : "opacity-0"}`}
-                  >
-                    <button
-                      onClick={handleBack}
-                      className="mb-10 w-12 h-12 bg-muted text-muted-foreground hover:text-primary rounded-md flex items-center justify-center transition-all border border-border"
-                    >
-                      <ArrowLeft size={20} />
-                    </button>
-                    <div className="mt-auto">
-                      <span className="text-primary font-bold uppercase tracking-widest text-[9px]">
-                        {MONTH_NAMES[currentMonth]} {currentYear}
-                      </span>
-                      <h2 className="text-[120px] font-bold leading-none -ml-2 tracking-tighter">
-                        {selectedDayObj.day.toString().padStart(2, "0")}
-                      </h2>
-                      <p className="text-muted-foreground font-bold uppercase tracking-widest text-[10px] mb-8">
-                        Aktivitas Terjadwal
-                      </p>
-                      <button
-                        onClick={() => setIsCreateModalOpen(true)}
-                        className="w-full py-4 bg-primary text-primary-foreground rounded-md font-bold text-[10px] uppercase tracking-widest shadow-xl shadow-primary/10 transition-transform active:scale-95"
-                      >
-                        + Buat Konten
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  className={`
-                  fixed right-8 top-8 bottom-8 left-[444px] z-[155] pointer-events-auto
-                  transition-all duration-500 delay-100 flex flex-col
-                  ${isFullyExpanded ? "opacity-100 translate-x-0" : "opacity-0 translate-x-20"}
-                `}
-                >
-                  <div className="bg-background/95 backdrop-blur-xl h-full rounded-lg border border-border p-10 flex flex-col shadow-2xl overflow-hidden">
-                    <div className="flex items-center justify-between mb-8 pb-6 border-b border-border">
-                      <div>
-                        <h3 className="text-3xl font-bold tracking-tight uppercase">
-                          Workspace Agenda
-                        </h3>
-                        <p className="text-muted-foreground font-bold uppercase tracking-wider text-[9px] mt-1">
-                          Daftar produksi aktif untuk hari ini
-                        </p>
-                      </div>
-                      <div className="flex gap-2">
-                        <button className="p-3 bg-muted rounded-md border border-border text-muted-foreground hover:text-foreground transition-colors">
-                          <MoreVertical size={16} />
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto pr-4 custom-scrollbar">
-                      {selectedDayObj.items.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center text-muted-foreground/50">
-                          <CalendarIcon size={100} strokeWidth={1} />
-                          <p className="text-xl font-bold mt-4 uppercase tracking-widest">
-                            Kosong
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6 pb-6">
-                          {selectedDayObj.items.map((item) => (
-                            <ElegantCard
-                              key={item.id}
-                              item={item}
-                              onEdit={handleEdit}
-                              onDelete={handleDelete}
-                            />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
-        {isCreateModalOpen && (
-          <div className="fixed inset-0 z-[300] flex items-center justify-center px-6 py-10 bg-background/80 backdrop-blur-xl">
-            <div className="bg-card text-card-foreground w-full max-w-2xl rounded-xl shadow-2xl border border-border overflow-hidden">
-              <form onSubmit={handleAddContent}>
-                <div className="px-10 pt-10 pb-6 flex items-center justify-between bg-muted/60 border-b border-border">
-                  <h3 className="text-2xl font-bold uppercase tracking-tight text-foreground">
-                    Input Aset Produksi
-                  </h3>
+        {/* Overlay agenda harian */}
+        {selectedDayObj && (
+          <Portal>
+            <div
+              className="fixed inset-0 z-[200] flex items-center justify-center bg-background/70 p-4 backdrop-blur-sm md:p-8"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) handleBack();
+              }}
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Agenda ${selectedDayObj.day} ${MONTH_NAMES[currentMonth]} ${currentYear}`}
+            >
+              <div className="flex h-full max-h-[900px] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl md:flex-row">
+                {/* Sisi kiri: tanggal */}
+                <aside className="flex shrink-0 flex-col border-b border-border p-6 md:w-[320px] md:border-r md:border-b-0 md:p-8">
                   <button
                     type="button"
-                    onClick={() => setIsCreateModalOpen(false)}
-                    className="text-muted-foreground hover:text-foreground transition-all"
+                    onClick={handleBack}
+                    aria-label="Kembali"
+                    autoFocus
+                    className="flex h-11 w-11 items-center justify-center rounded-md border border-border bg-muted text-muted-foreground transition-colors hover:text-primary"
                   >
-                    <X size={24} />
+                    <ArrowLeft size={20} />
                   </button>
-                </div>
 
-                <div className="px-10 py-8 space-y-6">
-                  <div className="space-y-2">
-                    <label className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">
-                      Judul Konten
-                    </label>
-                    <input
-                      required
-                      autoFocus
-                      className="w-full px-5 py-3 bg-background border border-input rounded-md focus:border-primary focus:ring-2 focus:ring-ring/20 outline-none transition-all font-bold text-foreground placeholder:text-muted-foreground"
-                      placeholder="Tulis judul..."
-                      value={newContent.title}
-                      onChange={(e) =>
-                        setNewContent({ ...newContent, title: e.target.value })
-                      }
-                    />
+                  <div className="mt-6 md:mt-auto">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-primary">
+                      {MONTH_NAMES[currentMonth]} {currentYear}
+                    </span>
+                    <h2 className="text-7xl font-bold leading-none tracking-tighter md:text-[120px]">
+                      {pad(selectedDayObj.day)}
+                    </h2>
+                    <p className="mb-6 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      Aktivitas Terjadwal
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenCreate(selectedDayObj.date)}
+                      className="w-full rounded-md bg-primary py-4 text-[10px] font-bold uppercase tracking-widest text-primary-foreground shadow-xl shadow-primary/10 transition-transform active:scale-95"
+                    >
+                      + Buat Konten
+                    </button>
+                  </div>
+                </aside>
+
+                {/* Sisi kanan: agenda */}
+                <section className="flex min-h-0 flex-1 flex-col bg-background/60 p-6 md:p-10">
+                  <div className="mb-6 flex items-center justify-between border-b border-border pb-6">
+                    <div>
+                      <h3 className="text-2xl font-bold uppercase tracking-tight md:text-3xl">
+                        Workspace Agenda
+                      </h3>
+                      <p className="mt-1 text-[9px] font-bold uppercase tracking-wider text-muted-foreground">
+                        Daftar produksi aktif untuk hari ini
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Menu"
+                      className="rounded-md border border-border bg-muted p-3 text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      <MoreVertical size={16} />
+                    </button>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-6">
-                    <div className="space-y-2">
-                      <label className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">
-                        Platform
-                      </label>
-                      <SearchableSelect
-                        options={platformOptions}
-                        value={newContent.platform}
-                        onChange={(val) =>
-                          setNewContent({
-                            ...newContent,
-                            platform: val,
-                          })
-                        }
-                        placeholder="Pilih platform"
-                        className="w-full text-xs font-bold uppercase bg-background border border-input text-foreground"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">
-                        Status
-                      </label>
-                      <SearchableSelect
-                        options={[
-                          { value: "Draft", label: "Draft" },
-                          { value: "Scheduled", label: "Scheduled" },
-                          { value: "Published", label: "Published" },
-                        ]}
-                        value={newContent.status}
-                        onChange={(val) =>
-                          setNewContent({
-                            ...newContent,
-                            status: val,
-                          })
-                        }
-                        placeholder="Pilih status"
-                        className="w-full text-xs font-bold uppercase bg-background border border-input text-foreground"
-                      />
-                    </div>
+                  {/* min-h-0 wajib agar overflow-y-auto benar-benar scroll di dalam flex */}
+                  <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto pr-2">
+                    {selectedDayObj.items.length === 0 ? (
+                      <div className="flex h-full flex-col items-center justify-center text-muted-foreground/50">
+                        <CalendarIcon size={100} strokeWidth={1} />
+                        <p className="mt-4 text-xl font-bold uppercase tracking-widest">
+                          Kosong
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-6 pb-6 sm:grid-cols-2 xl:grid-cols-3">
+                        {selectedDayObj.items.map((item) => (
+                          <ElegantCard
+                            key={item.id}
+                            item={item}
+                            onEdit={handleEdit}
+                            onDelete={handleDelete}
+                            isDeleting={isDeleting}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">
-                      Tanggal
-                    </label>
-                    <div className="bg-background border border-input rounded-md px-3 py-2">
-                      <DatePicker
-                        value={newContent.date}
-                        onChange={(val) =>
-                          setNewContent({
-                            ...newContent,
-                            date: val,
-                          })
-                        }
-                        label={null}
-                        placeholder="Pilih tanggal & waktu"
-                        className="text-xs font-bold"
-                        withTime
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="px-10 pb-10 pt-2 flex justify-end">
-                  <button
-                    type="submit"
-                    disabled={isSaving || isUpdating}
-                    className="w-full py-4 bg-primary text-primary-foreground rounded-md font-bold text-[10px] uppercase tracking-widest hover:brightness-110 transition-all shadow-lg shadow-primary/15 disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    {isSaving || isUpdating
-                      ? "Menyimpan..."
-                      : "Simpan Aset Produksi"}
-                  </button>
-                </div>
-              </form>
+                </section>
+              </div>
             </div>
-          </div>
+          </Portal>
         )}
 
-        <style
-          dangerouslySetInnerHTML={{
-            __html: `
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: color-mix(in oklch, var(--muted-foreground) 35%, transparent); border-radius: 10px; }
-      `,
-          }}
-        />
+        {/* Modal create / edit (z lebih tinggi dari agenda) */}
+        {isCreateModalOpen && (
+          <Portal>
+            <div
+              className="fixed inset-0 z-[300] flex items-center justify-center bg-background/80 px-6 py-10 backdrop-blur-xl"
+              role="dialog"
+              aria-modal="true"
+              aria-label={editingItem ? "Edit aset produksi" : "Input aset produksi"}
+            >
+              <div className="max-h-full w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-card text-card-foreground shadow-2xl">
+                <form onSubmit={handleSubmit}>
+                  <div className="px-10 pt-10 pb-6 flex items-center justify-between bg-muted/60 border-b border-border">
+                    <h3 className="text-2xl font-bold uppercase tracking-tight text-foreground">
+                      {editingItem ? "Edit Aset Produksi" : "Input Aset Produksi"}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={closeCreateModal}
+                      aria-label="Tutup"
+                      className="text-muted-foreground hover:text-foreground transition-all"
+                    >
+                      <X size={24} />
+                    </button>
+                  </div>
+
+                  <div className="px-10 py-8 space-y-6">
+                    <div className="space-y-2">
+                      <label htmlFor="content-title" className={LABEL_CLASS}>
+                        Judul Konten
+                      </label>
+                      <input
+                        id="content-title"
+                        required
+                        autoFocus
+                        className={INPUT_CLASS}
+                        placeholder="Tulis judul..."
+                        value={newContent.title}
+                        onChange={(e) => setField("title")(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-6">
+                      <div className="space-y-2">
+                        <label className={LABEL_CLASS}>Platform</label>
+                        <SearchableSelect
+                          options={PLATFORM_OPTIONS}
+                          value={newContent.platform}
+                          onChange={setField("platform")}
+                          placeholder="Pilih platform"
+                          className="w-full text-xs font-bold uppercase bg-background border border-input text-foreground"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className={LABEL_CLASS}>Status</label>
+                        <SearchableSelect
+                          options={STATUS_OPTIONS}
+                          value={newContent.status}
+                          onChange={setField("status")}
+                          placeholder="Pilih status"
+                          className="w-full text-xs font-bold uppercase bg-background border border-input text-foreground"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className={LABEL_CLASS}>Tanggal</label>
+                      <div className="bg-background border border-input rounded-md px-3 py-2">
+                        <DatePicker
+                          value={newContent.date}
+                          onChange={(val) => {
+                            setField("date")(val);
+                            setFormError("");
+                          }}
+                          label={null}
+                          placeholder="Pilih tanggal & waktu"
+                          className="text-xs font-bold"
+                          withTime
+                        />
+                      </div>
+                      {formError && (
+                        <p role="alert" className="text-[11px] font-bold text-destructive">
+                          {formError}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <label htmlFor="content-description" className={LABEL_CLASS}>
+                        Deskripsi
+                      </label>
+                      <textarea
+                        id="content-description"
+                        rows={3}
+                        className={`${INPUT_CLASS} resize-none font-medium`}
+                        placeholder="Tambahkan konteks untuk tim (opsional)"
+                        value={newContent.description}
+                        onChange={(e) => setField("description")(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="px-10 pb-10 pt-2 flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full py-4 bg-primary text-primary-foreground rounded-md font-bold text-[10px] uppercase tracking-widest hover:brightness-110 transition-all shadow-lg shadow-primary/15 disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {isSubmitting ? "Menyimpan..." : "Simpan Aset Produksi"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </Portal>
+        )}
+
+        <style dangerouslySetInnerHTML={{ __html: SCROLLBAR_CSS }} />
       </div>
     </DashboardLayout>
   );
