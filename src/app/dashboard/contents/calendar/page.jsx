@@ -516,7 +516,7 @@ const ContentPage = () => {
       title="Calendar Konten"
       desc="Kelola jadwal konten kamu di satu tempat."
     >
-      <div className="min-h-[calc(100vh-120px)] bg-background font-sans text-foreground flex flex-col overflow-hidden selection:bg-primary selection:text-primary-foreground rounded-xl border border-border shadow-xl">
+      <div className="mt-4 md:mt-6 min-h-[calc(100vh-120px)] bg-background font-sans text-foreground flex flex-col overflow-hidden selection:bg-primary selection:text-primary-foreground rounded-xl border border-border shadow-xl">
         <div className="flex-1 flex flex-col relative p-6 overflow-hidden">
           <div
             className={`mb-6 flex items-center justify-between transition-all duration-500 ${selectedDayObj ? "opacity-0 -translate-y-10 pointer-events-none" : "opacity-100"}`}
